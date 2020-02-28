@@ -55,16 +55,23 @@ when defined(emscripten):
 else:
     from osproc import quoteShell
 
-proc clurpCmdLine(thisModule: string, paths: openarray[string]): string {.compileTime.} =
-    result = "clurp wrap " & quoteShell(thisModule) & " "
-    for p in paths: result.add(quoteShell(p) & " ")
+proc clurpCmdLine(thisModule: string, paths: openarray[string], includeDirs: openarray[string]): string {.compileTime.} =
+    var clurp = "clurp"
+    when defined(windows):
+        clurp &= ".cmd"
+    result = clurp & " wrap --thisModule=" & quoteShell(thisModule) & " --paths="
+    for p in paths: result.add(quoteShell(p) & ":")
+    if includeDirs.len > 0:
+        result &= " --includes="
+        for p in includeDirs: result.add(quoteShell(p) & ":")
 
 proc nimPathWithCPath(thisModuleDir: string, p: string): string =
     result = thisModuleDir / "clurpcache" / p.extractFilename.changeFileExt("nim")
 
 proc isHeaderFile(file: string): bool =
-    let ext = file.splitFile.ext[1 .. ^1]
-    ext in ["h", "hp", "hpp", "h++"]
+    let ext = file.splitFile.ext
+    if ext.len == 0: return
+    ext[1 .. ^1] in ["h", "hp", "hpp", "h++"]
 
 macro importClurpPaths(thisModuleDir: static[string], paths: openarray[string]): untyped =
     result = newNimNode(nnkImportStmt)
@@ -73,13 +80,13 @@ macro importClurpPaths(thisModuleDir: static[string], paths: openarray[string]):
         if not pp.isHeaderFile:
             result.add(newLit(nimPathWithCPath(thisModuleDir, pp)))
 
-template clurp*(paths: static[openarray[string]]) =
+template clurp*(paths: static[openarray[string]], includeDirs: static[openarray[string]] = [""]) =
     const thisModule = instantiationInfo(fullPaths = true).filename
     const thisModuleDir = parentDir(thisModule)
-    const cmdLine = clurpCmdLine(thisModule, paths)
-    #static: echo cmdLine
+    const cmdLine = clurpCmdLine(thisModule, paths, includeDirs)
+    # static: echo "args: ", cmdLine
     const cmdLineRes = staticExec(cmdLine, cache = cmdLine)
-    #static: echo "RES: ", cmdLine
+    # static: echo "cmdLineRes  ", cmdLineRes
     importClurpPaths(thisModuleDir, paths)
 
 when isMainModule:
@@ -87,8 +94,9 @@ when isMainModule:
     import pegs
 
     proc isCppFile(file: string): bool =
-        let ext = file.splitFile.ext[1 .. ^1]
-        ext in ["cp", "cpp", "c++", "cc"]
+        let ext = file.splitFile.ext
+        if ext.len == 0: return
+        ext[1 .. ^1] in ["cp", "cpp", "c++", "cc"]
 
     let includePattern = peg""" { "#" \s* "include" \s* \" {[^"]*} \" } """
 
@@ -98,9 +106,11 @@ when isMainModule:
             result = p
         else:
             result = p[n + 2 .. ^1]
-            #echo "p: ", p, " normalized: ", result
+            # echo "p: ", p, " normalized: ", result
 
     type Context = ref object
+        currentPath: string
+        includes: seq[string]
         allHeaders: seq[string]
         includedHeaders: seq[string]
 
@@ -109,13 +119,23 @@ when isMainModule:
             if p.endsWith(header): return true
 
     proc preprocessIncludes(content: var string, ctx: Context) =
+        # echo "try process includes ", content.match(includePattern)
         content = content.replace(includePattern) do(m: int, n: int, c: openArray[string]) -> string:
             let header = normalizedIncludePath(c[1])
+            # echo "process header ", c, " h ", header
             var fullPath = ""
             for p in ctx.allHeaders:
                 if p.endsWith(header):
                     fullPath = p
                     break
+
+            if fullPath.len == 0 and ctx.includes.len > 0:
+                for incl in ctx.includes:
+                    if fileExists(incl / header):
+                        fullPath = incl / header
+
+                if fullPath.len == 0 and fileExists(ctx.currentPath / header):
+                    fullPath = ctx.currentPath / header
 
             if fullPath.len > 0:
                 if ctx.alreadyIncluded(header):
@@ -123,18 +143,23 @@ when isMainModule:
                 else:
                     var cnt = readFile(fullPath)
                     ctx.includedHeaders.add(fullPath)
+                    let prevPath = ctx.currentPath
+                    ctx.currentPath = parentDir(fullPath)
                     preprocessIncludes(cnt, ctx)
+                    ctx.currentPath = prevPath
                     discard ctx.includedHeaders.pop()
                     result = "\l" & cnt & "\l"
             else:
                 result = c[0]
 
-    proc wrapAUX(thisModule: string, paths: seq[string]) =
+    proc wrapAUX(thisModule: string, paths: string, includes: string = "") =
         # echo "called wrap for: ", thisModule
+        var paths = paths.split(":")
         let thisModuleDir = parentDir(thisModule)
 
         var c = Context.new()
         c.allHeaders = @[]
+        c.includes = includes.split(":")
         for p in paths:
             if p.isHeaderFile: c.allHeaders.add(thisModuleDir / p)
         c.includedHeaders = @[]
@@ -142,7 +167,9 @@ when isMainModule:
         for p in paths:
             if not p.isHeaderFile:
                 var src = readFile(thisModuleDir / p)
+                c.currentPath = parentDir(thisModuleDir / p)
                 preprocessIncludes(src, c)
+                doAssert(c.currentPath == parentDir(thisModuleDir / p), "currentPath broken")
                 var dst = "{.emit:\"\"\"\l"
                 dst &= src
                 dst &= "\"\"\".}\l"
