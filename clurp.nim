@@ -1,4 +1,4 @@
-import os, macros, strutils, tables
+import os, macros, strutils
 
 when defined(emscripten):
     proc quoteShellWindows(s: string): string {.compileTime.} =
@@ -86,12 +86,12 @@ template clurp*(paths: static[openarray[string]], includeDirs: static[openarray[
     const cmdLine = clurpCmdLine(thisModule, paths, includeDirs)
     # static: echo "args: ", cmdLine
     const cmdLineRes = staticExec(cmdLine, cache = cmdLine)
-    # static: echo "cmdLineRes  ", cmdLineRes
+    # static: echo cmdLineRes
     importClurpPaths(thisModuleDir, paths)
 
 when isMainModule:
     import cligen
-    import pegs
+    import pegs, sets
 
     proc isCppFile(file: string): bool =
         let ext = file.splitFile.ext
@@ -109,20 +109,18 @@ when isMainModule:
             # echo "p: ", p, " normalized: ", result
 
     type Context = ref object
+        moduleHeaders: HashSet[string]
         currentPath: string
         includes: seq[string]
         allHeaders: seq[string]
-        includedHeaders: seq[string]
-
-    proc alreadyIncluded(c: Context, header: string): bool =
-        for p in c.includedHeaders:
-            if p.endsWith(header): return true
 
     proc preprocessIncludes(content: var string, ctx: Context) =
         # echo "try process includes ", content.match(includePattern)
         content = content.replace(includePattern) do(m: int, n: int, c: openArray[string]) -> string:
             let header = normalizedIncludePath(c[1])
             # echo "process header ", c, " h ", header
+            if header in ctx.moduleHeaders: return ""
+
             var fullPath = ""
             for p in ctx.allHeaders:
                 if p.endsWith(header):
@@ -138,17 +136,15 @@ when isMainModule:
                     fullPath = ctx.currentPath / header
 
             if fullPath.len > 0:
-                if ctx.alreadyIncluded(header):
-                    result = ""
-                else:
-                    var cnt = readFile(fullPath)
-                    ctx.includedHeaders.add(fullPath)
-                    let prevPath = ctx.currentPath
-                    ctx.currentPath = parentDir(fullPath)
-                    preprocessIncludes(cnt, ctx)
-                    ctx.currentPath = prevPath
-                    discard ctx.includedHeaders.pop()
-                    result = "\l" & cnt & "\l"
+                var cnt = readFile(fullPath)
+                ctx.moduleHeaders.incl(header)
+                let prevPath = ctx.currentPath
+                ctx.currentPath = parentDir(fullPath)
+                preprocessIncludes(cnt, ctx)
+                ctx.currentPath = prevPath
+                let sign = "//CLURP_HEADER_INJECT:" & header.toUpperAscii()
+                result = "\l" & sign & "\l"  & cnt.indent(2) & "\l" & sign & "\l"
+
             else:
                 result = c[0]
 
@@ -162,15 +158,14 @@ when isMainModule:
         c.includes = includes.split(":")
         for p in paths:
             if p.isHeaderFile: c.allHeaders.add(thisModuleDir / p)
-        c.includedHeaders = @[]
-
         for p in paths:
             if not p.isHeaderFile:
                 var src = readFile(thisModuleDir / p)
                 c.currentPath = parentDir(thisModuleDir / p)
+                c.moduleHeaders = initHashSet[string]()
                 preprocessIncludes(src, c)
                 doAssert(c.currentPath == parentDir(thisModuleDir / p), "currentPath broken")
-                var dst = "{.emit:\"\"\"\l"
+                var dst = "{.used.}\n{.emit:\"\"\"\l"
                 dst &= src
                 dst &= "\"\"\".}\l"
                 if p.isCppFile:
