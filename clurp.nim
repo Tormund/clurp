@@ -92,9 +92,9 @@ template clurp*(paths: static[openarray[string]], includeDirs: static[openarray[
     # static: echo "args: ", cmdLine
     const res = gorgeEx(cmdLine, cache = cmdLine)
     static:
-        if res.exitCode != 0:
+        when res.exitCode != 0:
             {.error: res.output.}
-    # static: echo res , " res ", res
+
     importClurpPaths(thisModuleDir, paths)
 
 when isMainModule:
@@ -126,7 +126,7 @@ when isMainModule:
         # echo "try process includes ", content.match(includePattern)
         content = content.replace(includePattern) do(m: int, n: int, c: openArray[string]) -> string:
             let header = normalizedIncludePath(c[1])
-            echo "process header ", c, " h ", header
+            # echo "process header ", c, " h ", header
             if header in ctx.moduleHeaders or header.len == 0: return ""
 
             var fullPath = ""
@@ -157,7 +157,7 @@ when isMainModule:
             else:
                 result = c[0]
 
-    proc wrapAUX(thisModule: string, paths: string, includes: string = "") =
+    proc wrapAUX(thisModule: string, paths: string, includes: string = ""):int =
         # echo "called wrap for: ", thisModule
         var paths = paths.split(":")
         let thisModuleDir = parentDir(thisModule)
