@@ -60,10 +60,15 @@ proc clurpCmdLine(thisModule: string, paths: openarray[string], includeDirs: ope
     when defined(windows):
         clurp &= ".cmd"
     result = clurp & " wrap --thisModule=" & quoteShell(thisModule) & " --paths="
-    for p in paths: result.add(quoteShell(p) & ":")
+    var pathes: seq[string]
+    for i, p in paths: pathes.add(quoteShell(p))
+    result.add(pathes.join(":"))
+
     if includeDirs.len > 0:
         result &= " --includes="
-        for p in includeDirs: result.add(quoteShell(p) & ":")
+        var includes: seq[string]
+        for p in includeDirs: includes.add(quoteShell(p))
+        result.add(includes.join(":"))
 
 proc nimPathWithCPath(thisModuleDir: string, p: string): string =
     result = thisModuleDir / "clurpcache" / p.extractFilename.changeFileExt("nim")
@@ -85,8 +90,11 @@ template clurp*(paths: static[openarray[string]], includeDirs: static[openarray[
     const thisModuleDir = parentDir(thisModule)
     const cmdLine = clurpCmdLine(thisModule, paths, includeDirs)
     # static: echo "args: ", cmdLine
-    const cmdLineRes = staticExec(cmdLine, cache = cmdLine)
-    # static: echo cmdLineRes
+    const res = gorgeEx(cmdLine, cache = cmdLine)
+    static:
+        if res.exitCode != 0:
+            {.error: res.output.}
+    # static: echo res , " res ", res
     importClurpPaths(thisModuleDir, paths)
 
 when isMainModule:
@@ -118,8 +126,8 @@ when isMainModule:
         # echo "try process includes ", content.match(includePattern)
         content = content.replace(includePattern) do(m: int, n: int, c: openArray[string]) -> string:
             let header = normalizedIncludePath(c[1])
-            # echo "process header ", c, " h ", header
-            if header in ctx.moduleHeaders: return ""
+            echo "process header ", c, " h ", header
+            if header in ctx.moduleHeaders or header.len == 0: return ""
 
             var fullPath = ""
             for p in ctx.allHeaders:
@@ -136,7 +144,8 @@ when isMainModule:
                     fullPath = ctx.currentPath / header
 
             if fullPath.len > 0:
-                var cnt = readFile(fullPath)
+                var cnt = try: readFile(fullPath)
+                    except: raise newException(Exception, "Can't open header file: " & fullPath)
                 ctx.moduleHeaders.incl(header)
                 let prevPath = ctx.currentPath
                 ctx.currentPath = parentDir(fullPath)
@@ -160,7 +169,8 @@ when isMainModule:
             if p.isHeaderFile: c.allHeaders.add(thisModuleDir / p)
         for p in paths:
             if not p.isHeaderFile:
-                var src = readFile(thisModuleDir / p)
+                var src = try: readFile(thisModuleDir / p)
+                    except: raise newException(Exception, "Can't open source file: " & thisModuleDir / p)
                 c.currentPath = parentDir(thisModuleDir / p)
                 c.moduleHeaders = initHashSet[string]()
                 preprocessIncludes(src, c)
