@@ -93,7 +93,7 @@ template clurp*(paths: static[openarray[string]], includeDirs: static[openarray[
     const res = gorgeEx(cmdLine, cache = cmdLine)
     static:
         when res.exitCode != 0:
-            {.error: res.output.}
+            {.error: "Gorge failed command: " & cmdLine & "\nOutput:" & res.output.}
 
     importClurpPaths(thisModuleDir, paths)
 
